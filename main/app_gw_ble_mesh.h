@@ -1,0 +1,2 @@
+
+#define APP_GW_GET_NODE_INFO 0x86

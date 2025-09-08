@@ -1,0 +1,2 @@
+idf_component_register(SRCS "app_gw_ethernet.c" "app_gw_uart.c" "app_gw_nvs.c" "app_gw_wifi.c" "app_gw_button_handle.c" "app_gw_lcd.c" "app_gw_lora.c" "app_gw_ble_mesh.c" "app_gw_mqtt.c" "main.c"
+                    INCLUDE_DIRS ".")
