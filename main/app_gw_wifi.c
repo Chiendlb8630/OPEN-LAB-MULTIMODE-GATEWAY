@@ -10,9 +10,12 @@
 #include "esp_system.h"
 #include "esp_netif.h"
 #include "esp_http_server.h"
+#include "app_gw_nvs.h"
 
 #define WIFI_AP_SSID "IOT Gateway Wifi"
 #define WIFI_AP_PASS "12345678"
+
+uint8_t g_wifi_sta_flag = 0;
 
 static const char *TAG = "WIFI_MODULE";
 // ================================================ Web page HTML form ===================================================
@@ -43,9 +46,8 @@ static const char html_form[] =
 "</html>";
 // ==============================================================================================================================
 wifi_info_t g_wifi_info;
-int g_wifi_status = 0;
 
-void app_wifi_switch_to_sta(const char *ssid_rcvAP, const char *pass_rcvAP);
+void app_wifi_switch_to_sta();
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
     httpd_resp_send(req, html_form, strlen(html_form));
@@ -58,12 +60,12 @@ static esp_err_t connect_post_handler(httpd_req_t *req) {
     if (ret <= 0) return ESP_FAIL;
     buf[ret] = '\0';
     ESP_LOGI(TAG, "Recv: %s", buf);
-    char ssid[32] = {0}, pass[64] = {0};
-    sscanf(buf, "ssid=%31[^&]&password=%63s", ssid, pass);
+    sscanf(buf, "ssid=%31[^&]&password=%63s", g_wifi_info.ssid, g_wifi_info.pass);
 
-    app_wifi_switch_to_sta(ssid, pass);
-    ESP_LOGI(TAG, "SSID: %s, PASS: %s", ssid, pass);
+    ESP_LOGI(TAG, "Parsed SSID: %s", g_wifi_info.ssid);
+    ESP_LOGI(TAG, "Parsed PASS: %s", g_wifi_info.pass);
     httpd_resp_sendstr(req, "Received! ESP switch to STA");
+    app_wifi_switch_to_sta();
     return ESP_OK;
 }
 
@@ -93,17 +95,15 @@ void start_webserver(void) {
 }
 
 static void wifi_init_softap(void) {
+    app_nvs_flag_change_state(0);
     esp_netif_create_default_wifi_ap();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-
     wifi_config_t ap_config = {
         .ap = {
             .ssid = WIFI_AP_SSID,
             .ssid_len = strlen(WIFI_AP_SSID),
             .channel = 1,
             .password = WIFI_AP_PASS,
-            .max_connection = 1,
+            .max_connection = 3,
             .authmode = WIFI_AUTH_WPA_WPA2_PSK
         },
     };
@@ -113,7 +113,6 @@ static void wifi_init_softap(void) {
     esp_wifi_set_mode(WIFI_MODE_AP);
     esp_wifi_set_config(WIFI_IF_AP, &ap_config);
     esp_wifi_start();
-
     ESP_LOGI(TAG, "AP started! SSID:%s, PASS:%s", WIFI_AP_SSID, WIFI_AP_PASS);
 }
 
@@ -124,40 +123,42 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        app_nvs_save_wifi_info(g_wifi_info.ssid, g_wifi_info.pass);
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     }
 }
 
-void app_wifi_switch_to_sta(const char *ssid_rcvAP, const char *pass_rcvAP)
+void app_wifi_switch_to_sta(void)
 {
     ESP_ERROR_CHECK(esp_wifi_stop());   
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     assert(sta_netif);
     wifi_config_t wifi_config = {0};
-    strncpy((char *)wifi_config.sta.ssid, ssid_rcvAP, sizeof(wifi_config.sta.ssid));
-    strncpy((char *)wifi_config.sta.password, pass_rcvAP, sizeof(wifi_config.sta.password));
+
+    memcpy(wifi_config.sta.ssid, g_wifi_info.ssid, sizeof(wifi_config.sta.ssid));
+    memcpy(wifi_config.sta.password, g_wifi_info.pass, sizeof(wifi_config.sta.password));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    if(!g_wifi_sta_flag) ESP_ERROR_CHECK(esp_wifi_connect());
+    app_nvs_flag_change_state(1);
 }
 
 void app_wifi_init(void) {
-    nvs_flash_init();
     esp_netif_init();
     esp_event_loop_create_default();
-    if (load_wifi_credentials(g_wifi_info.ssid, sizeof(g_wifi_info.ssid), g_wifi_info.pass, sizeof(g_wifi_info.pass))) {
-        ESP_LOGI(TAG, "Found WiFi credentials in NVS, SSID: %s", g_wifi_info.ssid);
-        app_wifi_switch_to_sta(g_wifi_info.ssid, g_wifi_info.pass);
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    if (g_wifi_sta_flag){
+        ESP_LOGI(TAG, "Wifi mode is on");
+        app_nvs_load_wifi_info(g_wifi_info.ssid, sizeof(g_wifi_info.ssid), g_wifi_info.pass, sizeof(g_wifi_info.pass));
+        app_wifi_switch_to_sta();
     } else {
-        ESP_LOGI(TAG, "No WiFi credentials, starting AP mode");
+        ESP_LOGI(TAG, "Wifi AP mode is on");
         wifi_init_softap();
         start_webserver();
     }

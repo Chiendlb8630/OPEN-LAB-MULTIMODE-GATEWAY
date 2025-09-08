@@ -8,4 +8,6 @@ typedef struct {
 }wifi_info_t;
 
 extern wifi_info_t g_wifi_info;
-extern int g_wifi_status;
+extern uint8_t g_wifi_sta_flag;
+
+void app_wifi_init(void);
